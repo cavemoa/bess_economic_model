@@ -1,0 +1,19 @@
+id: acaes_salt_100mw
+technology: adiabatic_compressed_air_energy_storage
+description: >-
+  Generic salt-cavern adiabatic CAES (A-CAES) reference system. It is modelled as
+  energy-only until a technology-specific reserve response envelope is evidenced.
+
+asset:
+  charge_power_mw: 100.0
+  discharge_power_mw: 100.0
+  nominal_energy_mwh: 1000.0
+  soc_min_fraction: 0.0
+  soc_max_fraction: 1.0
+  initial_soc_fraction: 0.50
+  charge_efficiency: 0.8124038405
+  discharge_efficiency: 0.8124038405
+  max_equivalent_full_cycles_per_day: null
+
+reserve_price_taker:
+  enabled: false

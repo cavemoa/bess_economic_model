@@ -1,0 +1,26 @@
+simulation:
+  id: bess_sfd2201_june_2026
+  system_file: systems/bess_huntly_like.yaml
+  cost_case_file: cost_cases/bess_huntly_like_base.yaml
+
+data:
+  month: "2026-06"
+  node: "SFD2201"
+  island: "NI"
+  raw_data_dir: "data/raw"
+
+finance:
+  # Pre-tax, ungeared, real-NZD scenario. SFD connection and BBC costs need a site quote.
+  project_life_years: 20
+  real_discount_rate: 0.08
+  annual_variable_margin_fade: 0.015
+  annualisation_factor: 12
+  augmentation:
+    []
+
+solver:
+  time_limit_seconds: 300
+  mip_relative_gap: 0.0001
+
+reporting:
+  output_dir: "outputs"

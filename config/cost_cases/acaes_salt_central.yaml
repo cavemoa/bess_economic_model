@@ -1,0 +1,17 @@
+id: acaes_salt_central
+description: Central published A-CAES screening case; not a site-specific EPC estimate.
+currency:
+  code: USD
+  nzd_per_unit: 1.65
+  basis: Assumed real 2026 NZD per USD for comparative screening only.
+
+capital:
+  model: power_and_energy
+  power_island_cost_per_kw: 1325.0
+  storage_cost_per_kwh: 14.5
+  interconnection_cost_per_kw: 140.0
+
+operating_costs:
+  discharge_variable_cost_label: A-CAES variable O&M
+  discharge_variable_cost_per_mwh: 2.75
+  fixed_om_per_kw_year: 20.0

@@ -1,0 +1,21 @@
+id: bess_huntly_like_100mw_200mwh
+technology: lithium_ion_battery
+description: 100 MW / 200 MWh reference BESS, technically analogous to Genesis Huntly BESS.
+
+asset:
+  charge_power_mw: 100.0
+  discharge_power_mw: 100.0
+  nominal_energy_mwh: 200.0
+  soc_min_fraction: 0.125
+  soc_max_fraction: 0.875
+  initial_soc_fraction: 0.50
+  round_trip_efficiency: 0.90
+  max_equivalent_full_cycles_per_day: null
+
+reserve_price_taker:
+  # Optimistic historic-price scenario, not a forecast of clearing or dispatch revenue.
+  enabled: true
+  max_offer_mw: 100.0
+  product_stacking: common_response_capacity
+  fir_sustain_minutes: 1.0
+  sir_sustain_minutes: 15.0

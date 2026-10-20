@@ -1,0 +1,18 @@
+id: bess_huntly_like_base
+description: Existing BESS financial assumptions, retained unchanged for regression comparison.
+currency:
+  code: NZD
+
+capital:
+  model: direct
+  project_capex: 150000000.0
+
+operating_costs:
+  discharge_variable_cost_label: Battery degradation cost
+  discharge_variable_cost_per_mwh: 62.50
+  frequency_keeping_charge_per_mwh_imported: 0.40
+  trading_charge_per_mwh_imported: 0.00
+  trading_charge_per_mwh_exported: 0.00
+  instantaneous_reserve_cost_per_mwh_exported: 0.00
+  fixed_opex_annual: 2250000.0
+  transmission_and_connection_annual: 0.0
