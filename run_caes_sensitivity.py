@@ -22,7 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from bess_model.configuration import load_study_config
 from bess_model.data import configured_period_label, load_market_data, write_manifest
-from bess_model.dispatch import solve_energy_dispatch
+from bess_model.dispatch import solve_energy_dispatch, solve_fir_sir_price_taker_dispatch
 from bess_model.finance import calculate_project_npv
 
 
@@ -74,6 +74,12 @@ def _npv(intervals: pd.DataFrame, config: dict[str, Any]) -> float:
     return float(calculate_project_npv(intervals, config)[1]["npv_nzd"])
 
 
+def _solve_case(market: pd.DataFrame, config: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if config.get("reserve_price_taker", {}).get("enabled", False):
+        return solve_fir_sir_price_taker_dispatch(market, config)
+    return solve_energy_dispatch(market, config)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config/acaes_sfd2201_annual_sensitivity.yaml")
@@ -101,7 +107,7 @@ def main() -> None:
                 simulation_path, cost_path, {"nominal_energy_mwh": duration * power_mw}
             )
             started = time.perf_counter()
-            intervals, dispatch_meta = solve_energy_dispatch(market, config)
+            intervals, dispatch_meta = _solve_case(market, config)
             seconds = time.perf_counter() - started
             finance_meta = calculate_project_npv(intervals, config)[1]
             case_id = config["cost_case"]["cost_case_id"]
@@ -122,7 +128,8 @@ def main() -> None:
                     "equivalent_full_cycles": float(intervals["discharge_mwh"].sum()) / float(dispatch_meta["usable_energy_mwh"]),
                     "mip_gap": dispatch_meta["mip_gap"],
                     "solve_seconds": seconds,
-                    "dispatch_basis": "cost-case-specific optimal energy-only dispatch",
+                    "dispatch_case": dispatch_meta["dispatch_case"],
+                    "dispatch_basis": "cost-case-specific optimal dispatch",
                 }
             )
             solved[(duration, case_id)] = (config, intervals, finance_meta)
@@ -157,8 +164,8 @@ def main() -> None:
     low_variant, high_variant = deepcopy(base_config), deepcopy(base_config)
     low_variant["operating_costs"]["discharge_variable_cost_per_mwh"] = low_config["operating_costs"]["discharge_variable_cost_per_mwh"]
     high_variant["operating_costs"]["discharge_variable_cost_per_mwh"] = high_config["operating_costs"]["discharge_variable_cost_per_mwh"]
-    low_vom_intervals, _ = solve_energy_dispatch(market, low_variant)
-    high_vom_intervals, _ = solve_energy_dispatch(market, high_variant)
+    low_vom_intervals, _ = _solve_case(market, low_variant)
+    high_vom_intervals, _ = _solve_case(market, high_variant)
     tornado_rows.append({"parameter": "Variable O&M", "low_npv_nzd": _npv(low_vom_intervals, low_variant), "high_npv_nzd": _npv(high_vom_intervals, high_variant)})
     tornado = pd.DataFrame(tornado_rows)
     tornado["low_delta_nzd"] = tornado["low_npv_nzd"] - base_npv
@@ -168,7 +175,7 @@ def main() -> None:
     tornado.to_csv(output_dir / "npv_tornado.csv", index=False, float_format="%.6f")
     _write_tornado_chart(tornado, base_npv, output_dir / "npv_tornado.png")
     summary = {
-        "scope": "Historic, perfect-foresight, energy-only A-CAES screening sensitivity; no reserve revenue.",
+        "scope": "Historic, perfect-foresight A-CAES screening sensitivity with the configured illustrative FIR/SIR stack.",
         "period": period_label,
         "node": central_config["data"]["node"],
         "duration_definition": "Nominal storage MWh divided by 100 MW discharge power; the A-CAES SoC window is 0-100%.",

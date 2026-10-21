@@ -108,6 +108,74 @@ class DispatchTests(unittest.TestCase):
         self.assertAlmostEqual(float(intervals["sir_reserve_revenue_nzd"].sum()), 6.0, places=6)
         self.assertAlmostEqual(meta["objective_variable_margin_nzd"], 16.0, places=6)
 
+    def test_directional_charge_stack_earns_fir_and_sir_against_scheduled_load(self) -> None:
+        market = pd.DataFrame(
+            {
+                "timestamp_nz": pd.date_range("2026-06-01", periods=2, freq="30min"),
+                "TradingDate": ["2026-06-01"] * 2,
+                "TradingPeriod": [1, 2],
+                "sfd_price_nzd_per_mwh": [0.0, 0.0],
+                "fir_price_nzd_per_mwh": [2.0, 0.0],
+                "sir_price_nzd_per_mwh": [3.0, 0.0],
+            }
+        )
+        config = tiny_config()
+        config["reserve_price_taker"] = {
+            "charging_interruptible_load": {
+                "product_stacking": "common_response_capacity",
+                "fir": {"enabled": True, "max_offer_mw": 10.0, "sustain_minutes": 1.0},
+                "sir": {"enabled": True, "max_offer_mw": 10.0, "sustain_minutes": 15.0},
+            },
+            "discharging_generation": {
+                "product_stacking": "exclusive_capacity",
+                "fir": {"enabled": False, "max_offer_mw": 0.0, "sustain_minutes": 1.0},
+                "sir": {"enabled": False, "max_offer_mw": 0.0, "sustain_minutes": 15.0},
+            },
+        }
+
+        intervals, meta = solve_fir_sir_price_taker_dispatch(market, config)
+
+        self.assertEqual(meta["dispatch_case"], "directional_fir_sir_price_taker")
+        self.assertAlmostEqual(float(intervals["fir_charge_interruptible_load_mw"].iloc[0]), 10.0, places=6)
+        self.assertAlmostEqual(float(intervals["sir_charge_interruptible_load_mw"].iloc[0]), 10.0, places=6)
+        self.assertLessEqual(
+            float((intervals["charge_reserve_response_capacity_mw"] - intervals["charge_mw"]).max()), 1e-6
+        )
+        self.assertAlmostEqual(float(intervals["fir_reserve_revenue_nzd"].sum()), 10.0, places=6)
+        self.assertAlmostEqual(float(intervals["sir_reserve_revenue_nzd"].sum()), 15.0, places=6)
+
+    def test_directional_generation_sir_holds_15_minute_energy_cover(self) -> None:
+        market = pd.DataFrame(
+            {
+                "timestamp_nz": pd.date_range("2026-06-01", periods=1, freq="30min"),
+                "TradingDate": ["2026-06-01"],
+                "TradingPeriod": [1],
+                "sfd_price_nzd_per_mwh": [0.0],
+                "fir_price_nzd_per_mwh": [0.0],
+                "sir_price_nzd_per_mwh": [3.0],
+            }
+        )
+        config = tiny_config()
+        config["asset"]["initial_soc_fraction"] = 0.1
+        config["reserve_price_taker"] = {
+            "charging_interruptible_load": {
+                "fir": {"enabled": False},
+                "sir": {"enabled": False},
+            },
+            "discharging_generation": {
+                "product_stacking": "exclusive_capacity",
+                "fir": {"enabled": False},
+                "sir": {"enabled": True, "max_offer_mw": 10.0, "sustain_minutes": 15.0},
+            },
+        }
+
+        intervals, _ = solve_fir_sir_price_taker_dispatch(market, config)
+
+        # 1 MWh above minimum sustains exactly 4 MW for 15 minutes at unit efficiency.
+        self.assertAlmostEqual(float(intervals["sir_generation_reserve_mw"].iloc[0]), 4.0, places=6)
+        self.assertAlmostEqual(float(intervals["fir_generation_reserve_mw"].sum()), 0.0, places=6)
+        self.assertAlmostEqual(float(intervals["sir_reserve_revenue_nzd"].sum()), 6.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

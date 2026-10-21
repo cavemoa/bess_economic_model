@@ -22,6 +22,20 @@ OPERATING_COST_COLUMNS = [
     "ir_allocation_cost_nzd",
 ]
 
+DIRECTIONAL_RESERVE_REVENUE_COLUMNS = [
+    "fir_charge_interruptible_load_revenue_nzd",
+    "sir_charge_interruptible_load_revenue_nzd",
+    "fir_generation_reserve_revenue_nzd",
+    "sir_generation_reserve_revenue_nzd",
+]
+
+DIRECTIONAL_RESERVE_OFFER_COLUMNS = [
+    "fir_charge_interruptible_load_mw",
+    "sir_charge_interruptible_load_mw",
+    "fir_generation_reserve_mw",
+    "sir_generation_reserve_mw",
+]
+
 BASE_CASHFLOW_COMPONENTS = [
     ("energy_export_revenue_nzd", "Energy export revenue", "#1f77b4"),
     ("energy_import_cashflow_nzd", "Energy import cashflow", "#ff7f0e"),
@@ -46,6 +60,21 @@ RESERVE_CASHFLOW_COMPONENTS = [
     ("fixed_opex_cost_nzd", "Fixed O&M / transmission", "#8c564b"),
 ]
 
+DIRECTIONAL_RESERVE_CASHFLOW_COMPONENTS = [
+    ("energy_export_revenue_nzd", "Energy export revenue", "#1f77b4"),
+    ("energy_import_cashflow_nzd", "Energy import cashflow", "#ff7f0e"),
+    ("fir_charge_interruptible_load_revenue_nzd", "FIR interruptible load", "#17becf"),
+    ("sir_charge_interruptible_load_revenue_nzd", "SIR interruptible load", "#2ca02c"),
+    ("fir_generation_reserve_revenue_nzd", "FIR generation reserve", "#9467bd"),
+    ("sir_generation_reserve_revenue_nzd", "SIR generation reserve", "#e377c2"),
+    ("discharge_variable_cost_nzd", "Discharge variable cost", "#d62728"),
+    ("frequency_keeping_cost_nzd", "Frequency keeping", "#9467bd"),
+    ("trading_import_cost_nzd", "Trading import", "#7f7f7f"),
+    ("trading_export_cost_nzd", "Trading export", "#bcbd22"),
+    ("ir_allocation_cost_nzd", "IR allocation", "#8c564b"),
+    ("fixed_opex_cost_nzd", "Fixed O&M / transmission", "#8c564b"),
+]
+
 
 def _build_pnl_by_period(intervals: pd.DataFrame, period_column: str) -> pd.DataFrame:
     """Aggregate operating and cashflow results by the supplied period column."""
@@ -61,6 +90,7 @@ def _build_pnl_by_period(intervals: pd.DataFrame, period_column: str) -> pd.Data
         "energy_import_cashflow_nzd",
         "fir_reserve_revenue_nzd",
         "sir_reserve_revenue_nzd",
+        *DIRECTIONAL_RESERVE_REVENUE_COLUMNS,
         *OPERATING_COST_COLUMNS,
         "fixed_opex_cost_nzd",
         "variable_margin_nzd",
@@ -69,7 +99,7 @@ def _build_pnl_by_period(intervals: pd.DataFrame, period_column: str) -> pd.Data
     pnl = working.groupby(period_column, as_index=False)[value_columns].sum()
     average_offers = (
         working.groupby(period_column, as_index=False)[
-            ["reserve_response_capacity_mw", "fir_offer_mw", "sir_offer_mw"]
+            ["reserve_response_capacity_mw", "fir_offer_mw", "sir_offer_mw", *DIRECTIONAL_RESERVE_OFFER_COLUMNS]
         ]
         .mean()
         .rename(
@@ -125,6 +155,7 @@ def build_scenario_comparison(
         "energy_import_cashflow_nzd",
         "fir_reserve_revenue_nzd",
         "sir_reserve_revenue_nzd",
+        *DIRECTIONAL_RESERVE_REVENUE_COLUMNS,
         *OPERATING_COST_COLUMNS,
         "fixed_opex_cost_nzd",
         "variable_margin_nzd",
@@ -215,6 +246,8 @@ def _incremental_pnl(
     )
     delta["fir_reserve_revenue_nzd"] = reserve["fir_reserve_revenue_nzd"]
     delta["sir_reserve_revenue_nzd"] = reserve["sir_reserve_revenue_nzd"]
+    for column in DIRECTIONAL_RESERVE_REVENUE_COLUMNS:
+        delta[column] = reserve[column] - base[column]
     delta["change_in_variable_costs_nzd"] = reserve[OPERATING_COST_COLUMNS].sum(axis=1) - base[
         OPERATING_COST_COLUMNS
     ].sum(axis=1)
@@ -245,7 +278,12 @@ def _write_cashflow_comparison_chart(
     axes[0].set_title(f"A. Energy-only dispatch - {period_label.lower()} cashflow")
     _format_pnl_axis(axes[0], energy_pnl, period_column)
 
-    _stack_signed_bars(axes[1], reserve_pnl, RESERVE_CASHFLOW_COMPONENTS)
+    directional_reserve = any(
+        reserve_pnl[column].abs().sum() > 1e-8 for column in DIRECTIONAL_RESERVE_REVENUE_COLUMNS
+    )
+    _stack_signed_bars(
+        axes[1], reserve_pnl, DIRECTIONAL_RESERVE_CASHFLOW_COMPONENTS if directional_reserve else RESERVE_CASHFLOW_COMPONENTS
+    )
     axes[1].plot(
         reserve_pnl.index,
         reserve_pnl["net_cashflow_nzd"],
@@ -254,23 +292,37 @@ def _write_cashflow_comparison_chart(
         linewidth=1.25,
         label="Net cashflow",
     )
-    axes[1].set_title(
-        f"B. FIR/SIR price-taker case - {period_label.lower()} cashflow (optimistic shared-capacity stack)"
-    )
+    reserve_title = "directional CAES stack" if directional_reserve else "optimistic shared-capacity stack"
+    axes[1].set_title(f"B. FIR/SIR price-taker case - {period_label.lower()} cashflow ({reserve_title})")
     _format_pnl_axis(axes[1], reserve_pnl, period_column)
 
     incremental = _incremental_pnl(energy_pnl, reserve_pnl, period_column)
-    _stack_signed_bars(
-        axes[2],
-        incremental,
+    incremental_components = [
+        ("change_in_energy_cashflow_nzd", "Change in energy cashflow", "#1f77b4"),
+    ]
+    if directional_reserve:
+        incremental_components.extend(
+            [
+                ("fir_charge_interruptible_load_revenue_nzd", "FIR interruptible load", "#17becf"),
+                ("sir_charge_interruptible_load_revenue_nzd", "SIR interruptible load", "#2ca02c"),
+                ("fir_generation_reserve_revenue_nzd", "FIR generation reserve", "#9467bd"),
+                ("sir_generation_reserve_revenue_nzd", "SIR generation reserve", "#e377c2"),
+            ]
+        )
+    else:
+        incremental_components.extend(
+            [
+                ("fir_reserve_revenue_nzd", "FIR availability revenue", "#17becf"),
+                ("sir_reserve_revenue_nzd", "SIR availability revenue", "#2ca02c"),
+            ]
+        )
+    incremental_components.extend(
         [
-            ("change_in_energy_cashflow_nzd", "Change in energy cashflow", "#1f77b4"),
-            ("fir_reserve_revenue_nzd", "FIR availability revenue", "#17becf"),
-            ("sir_reserve_revenue_nzd", "SIR availability revenue", "#2ca02c"),
             ("change_in_variable_costs_nzd", "Change in variable costs", "#d62728"),
             ("change_in_fixed_cost_nzd", "Change in fixed cost", "#8c564b"),
-        ],
+        ]
     )
+    _stack_signed_bars(axes[2], incremental, incremental_components)
     axes[2].plot(
         incremental.index,
         incremental["incremental_net_cashflow_nzd"],
@@ -338,31 +390,33 @@ def write_charts(
     axes[0].legend(price_handles + power_handles, price_labels + power_labels, loc="upper left", ncol=3, fontsize=8)
     axes[0].set_title("FIR/SIR price-taker operating case - energy dispatch, reserve offers and SoC")
 
-    axes[1].step(
-        reserve_intervals["timestamp_nz"],
-        reserve_intervals["fir_offer_mw"],
-        where="post",
-        color="#17becf",
-        linewidth=0.8,
-        label="FIR offered MW",
+    directional_reserve = any(
+        reserve_intervals[column].abs().sum() > 1e-8 for column in DIRECTIONAL_RESERVE_OFFER_COLUMNS
     )
-    axes[1].step(
-        reserve_intervals["timestamp_nz"],
-        reserve_intervals["sir_offer_mw"],
-        where="post",
-        color="#2ca02c",
-        linewidth=0.8,
-        label="SIR offered MW",
-    )
-    axes[1].step(
-        reserve_intervals["timestamp_nz"],
-        reserve_intervals["reserve_response_capacity_mw"],
-        where="post",
-        color="black",
-        linestyle="--",
-        linewidth=0.7,
-        label="Shared response capacity",
-    )
+    if directional_reserve:
+        for column, label, colour in [
+            ("fir_charge_interruptible_load_mw", "FIR interruptible load", "#17becf"),
+            ("sir_charge_interruptible_load_mw", "SIR interruptible load", "#2ca02c"),
+            ("fir_generation_reserve_mw", "FIR generation reserve", "#9467bd"),
+            ("sir_generation_reserve_mw", "SIR generation reserve", "#e377c2"),
+        ]:
+            axes[1].step(
+                reserve_intervals["timestamp_nz"], reserve_intervals[column], where="post", color=colour,
+                linewidth=0.8, label=label,
+            )
+    else:
+        axes[1].step(
+            reserve_intervals["timestamp_nz"], reserve_intervals["fir_offer_mw"], where="post",
+            color="#17becf", linewidth=0.8, label="FIR offered MW",
+        )
+        axes[1].step(
+            reserve_intervals["timestamp_nz"], reserve_intervals["sir_offer_mw"], where="post",
+            color="#2ca02c", linewidth=0.8, label="SIR offered MW",
+        )
+        axes[1].step(
+            reserve_intervals["timestamp_nz"], reserve_intervals["reserve_response_capacity_mw"], where="post",
+            color="black", linestyle="--", linewidth=0.7, label="Shared response capacity",
+        )
     axes[1].set_ylabel("MW")
     axes[1].set_ylim(bottom=0.0)
     axes[1].legend(loc="upper left", ncol=3, fontsize=8)

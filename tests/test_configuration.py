@@ -23,7 +23,10 @@ class ComposableConfigurationTests(unittest.TestCase):
     def test_acaes_central_case_composes_power_and_energy_capex(self) -> None:
         config = load_study_config(PROJECT_ROOT / "config" / "acaes_sfd2201_annual_sensitivity.yaml")
         self.assertEqual(config["system"]["technology"], "adiabatic_compressed_air_energy_storage")
-        self.assertFalse(config["reserve_price_taker"]["enabled"])
+        self.assertTrue(config["reserve_price_taker"]["enabled"])
+        self.assertTrue(config["reserve_price_taker"]["charging_interruptible_load"]["fir"]["enabled"])
+        self.assertFalse(config["reserve_price_taker"]["discharging_generation"]["fir"]["enabled"])
+        self.assertTrue(config["reserve_price_taker"]["discharging_generation"]["sir"]["enabled"])
         self.assertAlmostEqual(config["finance"]["project_capex_nzd"], 265_650_000.0, places=6)
         self.assertAlmostEqual(config["operating_costs"]["fixed_opex_annual_nzd"], 3_300_000.0, places=6)
         self.assertAlmostEqual(config["operating_costs"]["discharge_variable_cost_per_mwh"], 4.5375, places=6)

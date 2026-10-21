@@ -1,0 +1,39 @@
+id: acaes_salt_50mw_2h
+technology: adiabatic_compressed_air_energy_storage
+description: >-
+  Illustrative 50 MW / 100 MWh salt-cavern A-CAES system for capital-cost frontier
+  screening. Reserve capability is not vendor-tested or System Operator-approved.
+
+asset:
+  charge_power_mw: 50.0
+  discharge_power_mw: 50.0
+  nominal_energy_mwh: 100.0
+  soc_min_fraction: 0.0
+  soc_max_fraction: 1.0
+  initial_soc_fraction: 0.50
+  charge_efficiency: 0.8124038405
+  discharge_efficiency: 0.8124038405
+  max_equivalent_full_cycles_per_day: null
+
+reserve_price_taker:
+  enabled: true
+  charging_interruptible_load:
+    product_stacking: common_response_capacity
+    fir:
+      enabled: true
+      max_offer_mw: 50.0
+      sustain_minutes: 1.0
+    sir:
+      enabled: true
+      max_offer_mw: 50.0
+      sustain_minutes: 15.0
+  discharging_generation:
+    product_stacking: exclusive_capacity
+    fir:
+      enabled: false
+      max_offer_mw: 0.0
+      sustain_minutes: 1.0
+    sir:
+      enabled: true
+      max_offer_mw: 50.0
+      sustain_minutes: 15.0

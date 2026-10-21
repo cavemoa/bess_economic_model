@@ -41,6 +41,27 @@ class ReservePriceTakerScenario:
     sir_sustain_hours: float
 
 
+@dataclass(frozen=True)
+class DirectionalReserveProduct:
+    """A single reserve product available from one physical operating direction."""
+
+    enabled: bool
+    max_offer_mw: float
+    sustain_hours: float
+
+
+@dataclass(frozen=True)
+class DirectionalReservePriceTakerScenario:
+    """Illustrative interruptible-load and generation-reserve capability envelope."""
+
+    charging_product_stacking: str
+    generation_product_stacking: str
+    charging_fir: DirectionalReserveProduct
+    charging_sir: DirectionalReserveProduct
+    generation_fir: DirectionalReserveProduct
+    generation_sir: DirectionalReserveProduct
+
+
 def asset_from_config(config: dict[str, Any]) -> Asset:
     source = config["asset"]
     if "charge_efficiency" in source or "discharge_efficiency" in source:
@@ -110,6 +131,53 @@ def reserve_scenario_from_config(config: dict[str, Any], asset: Asset) -> Reserv
         product_stacking=product_stacking,
         fir_sustain_hours=fir_sustain_hours,
         sir_sustain_hours=sir_sustain_hours,
+    )
+
+
+def _directional_product(
+    source: dict[str, Any],
+    name: str,
+    default_max_mw: float,
+    default_sustain_minutes: float,
+) -> DirectionalReserveProduct:
+    settings = source.get(name, {})
+    if not isinstance(settings, dict):
+        raise ValueError(f"Reserve product {name!r} must be a mapping.")
+    enabled = bool(settings.get("enabled", False))
+    max_offer_mw = float(settings.get("max_offer_mw", default_max_mw))
+    sustain_hours = float(settings.get("sustain_minutes", default_sustain_minutes)) / 60.0
+    if max_offer_mw < 0.0 or max_offer_mw > default_max_mw:
+        raise ValueError(f"Reserve product {name!r} max_offer_mw must be between zero and asset power.")
+    if sustain_hours <= 0.0:
+        raise ValueError(f"Reserve product {name!r} sustain_minutes must be positive.")
+    return DirectionalReserveProduct(enabled, max_offer_mw if enabled else 0.0, sustain_hours)
+
+
+def directional_reserve_scenario_from_config(
+    config: dict[str, Any], asset: Asset
+) -> DirectionalReservePriceTakerScenario:
+    """Read the explicit CAES-style reserve mechanisms from YAML."""
+    source = config["reserve_price_taker"]
+    charge = source.get("charging_interruptible_load", {})
+    generation = source.get("discharging_generation", {})
+    if not isinstance(charge, dict) or not isinstance(generation, dict):
+        raise ValueError("Directional reserve settings must be mappings.")
+
+    def stacking(block: dict[str, Any], label: str) -> str:
+        value = str(block.get("product_stacking", "exclusive_capacity"))
+        if value not in {"common_response_capacity", "exclusive_capacity"}:
+            raise ValueError(
+                f"{label}.product_stacking must be common_response_capacity or exclusive_capacity."
+            )
+        return value
+
+    return DirectionalReservePriceTakerScenario(
+        charging_product_stacking=stacking(charge, "charging_interruptible_load"),
+        generation_product_stacking=stacking(generation, "discharging_generation"),
+        charging_fir=_directional_product(charge, "fir", asset.charge_power_mw, 1.0),
+        charging_sir=_directional_product(charge, "sir", asset.charge_power_mw, 15.0),
+        generation_fir=_directional_product(generation, "fir", asset.discharge_power_mw, 1.0),
+        generation_sir=_directional_product(generation, "sir", asset.discharge_power_mw, 15.0),
     )
 
 
@@ -291,6 +359,18 @@ def _solve_dispatch(
     intervals_out["sir_reserve_revenue_nzd"] = (
         intervals_out["sir_offer_mw"] * intervals_out["sir_price_nzd_per_mwh"] * HALF_HOUR
     )
+    # Direction-specific reserve fields are zero for the legacy BESS shared-response case.
+    for column in [
+        "fir_charge_interruptible_load_mw",
+        "sir_charge_interruptible_load_mw",
+        "fir_generation_reserve_mw",
+        "sir_generation_reserve_mw",
+        "fir_charge_interruptible_load_revenue_nzd",
+        "sir_charge_interruptible_load_revenue_nzd",
+        "fir_generation_reserve_revenue_nzd",
+        "sir_generation_reserve_revenue_nzd",
+    ]:
+        intervals_out[column] = 0.0
     intervals_out["discharge_variable_cost_nzd"] = -intervals_out["discharge_mwh"] * float(
         costs.get("discharge_variable_cost_per_mwh", costs.get("degradation_cost_per_mwh_discharged", 0.0))
     )
@@ -370,6 +450,294 @@ def _solve_dispatch(
     return intervals_out, metadata
 
 
+def _solve_directional_reserve_dispatch(
+    market: pd.DataFrame,
+    config: dict[str, Any],
+    reserve: DirectionalReservePriceTakerScenario,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Solve a storage model with distinct charge-side and generation-side reserve paths.
+
+    Charging reserve is interruptible load: an offered MW must be scheduled as charging
+    load, but does not consume stored energy when activated. Generation reserve must
+    retain inverter headroom and enough stored energy for the configured sustain time.
+    Activation itself is deliberately not simulated; this remains an availability-only,
+    historic-price, price-taker illustration.
+    """
+    asset = asset_from_config(config)
+    costs = config["operating_costs"]
+    solver_config = config["solver"]
+    price = market["sfd_price_nzd_per_mwh"].to_numpy(dtype=float)
+    fir_price = market["fir_price_nzd_per_mwh"].to_numpy(dtype=float)
+    sir_price = market["sir_price_nzd_per_mwh"].to_numpy(dtype=float)
+    intervals = len(market)
+    import_variable_cost, export_variable_cost = _variable_costs(config)
+
+    # Core blocks followed by FIR/SIR interruptible-load offers and FIR/SIR
+    # generation-reserve offers. Response capacity is derived from offers rather than
+    # represented as an unpriced helper variable, avoiding unnecessary MILP degeneracy.
+    charge_slice = slice(0, intervals)
+    discharge_slice = slice(intervals, 2 * intervals)
+    soc_slice = slice(2 * intervals, 3 * intervals + 1)
+    mode_slice = slice(3 * intervals + 1, 4 * intervals + 1)
+    core_count = 4 * intervals + 1
+    charge_fir_slice = slice(core_count, core_count + intervals)
+    charge_sir_slice = slice(core_count + intervals, core_count + 2 * intervals)
+    generation_fir_slice = slice(core_count + 2 * intervals, core_count + 3 * intervals)
+    generation_sir_slice = slice(core_count + 3 * intervals, core_count + 4 * intervals)
+    variable_count = core_count + 4 * intervals
+
+    objective = np.zeros(variable_count)
+    objective[charge_slice] = (price + import_variable_cost) * HALF_HOUR
+    objective[discharge_slice] = (-price + export_variable_cost) * HALF_HOUR
+    objective[charge_fir_slice] = -fir_price * HALF_HOUR
+    objective[generation_fir_slice] = -fir_price * HALF_HOUR
+    objective[charge_sir_slice] = -sir_price * HALF_HOUR
+    objective[generation_sir_slice] = -sir_price * HALF_HOUR
+
+    lower_bounds = np.full(variable_count, -np.inf)
+    upper_bounds = np.full(variable_count, np.inf)
+    lower_bounds[charge_slice] = 0.0
+    upper_bounds[charge_slice] = asset.charge_power_mw
+    lower_bounds[discharge_slice] = 0.0
+    upper_bounds[discharge_slice] = asset.discharge_power_mw
+    lower_bounds[soc_slice] = asset.soc_min_mwh
+    upper_bounds[soc_slice] = asset.soc_max_mwh
+    lower_bounds[2 * intervals] = upper_bounds[2 * intervals] = asset.initial_soc_mwh
+    lower_bounds[3 * intervals] = upper_bounds[3 * intervals] = asset.initial_soc_mwh
+    lower_bounds[mode_slice] = 0.0
+    upper_bounds[mode_slice] = 1.0
+    for variable_slice, maximum in [
+        (charge_fir_slice, reserve.charging_fir.max_offer_mw),
+        (charge_sir_slice, reserve.charging_sir.max_offer_mw),
+        (generation_fir_slice, reserve.generation_fir.max_offer_mw),
+        (generation_sir_slice, reserve.generation_sir.max_offer_mw),
+    ]:
+        lower_bounds[variable_slice] = 0.0
+        upper_bounds[variable_slice] = maximum
+
+    # Three core constraints and eight directional-reserve constraints per interval.
+    rows = 11 * intervals + (1 if asset.max_daily_efc is not None else 0)
+    matrix = lil_matrix((rows, variable_count), dtype=float)
+    constraint_lower = np.full(rows, -np.inf)
+    constraint_upper = np.full(rows, np.inf)
+    row = 0
+    for t in range(intervals):
+        # e[t+1] - e[t] - eta_c*c[t]*dt + d[t]*dt/eta_d = 0
+        matrix[row, 2 * intervals + t + 1] = 1.0
+        matrix[row, 2 * intervals + t] = -1.0
+        matrix[row, t] = -asset.eta_charge * HALF_HOUR
+        matrix[row, intervals + t] = HALF_HOUR / asset.eta_discharge
+        constraint_lower[row] = constraint_upper[row] = 0.0
+        row += 1
+
+        matrix[row, t] = 1.0
+        matrix[row, 3 * intervals + 1 + t] = -asset.charge_power_mw
+        constraint_upper[row] = 0.0
+        row += 1
+
+        matrix[row, intervals + t] = 1.0
+        matrix[row, 3 * intervals + 1 + t] = asset.discharge_power_mw
+        constraint_upper[row] = asset.discharge_power_mw
+        row += 1
+
+        # Interruptible-load response can only be offered against scheduled charging load.
+        if reserve.charging_product_stacking == "common_response_capacity":
+            matrix[row, charge_fir_slice.start + t] = 1.0
+            matrix[row, t] = -1.0
+            constraint_upper[row] = 0.0
+            row += 1
+            matrix[row, charge_sir_slice.start + t] = 1.0
+            matrix[row, t] = -1.0
+            constraint_upper[row] = 0.0
+            row += 1
+        else:
+            matrix[row, charge_fir_slice.start + t] = 1.0
+            matrix[row, charge_sir_slice.start + t] = 1.0
+            matrix[row, t] = -1.0
+            constraint_upper[row] = 0.0
+            row += 1
+            matrix[row, charge_fir_slice.start + t] = 1.0
+            matrix[row, t] = -1.0
+            constraint_upper[row] = 0.0
+            row += 1
+
+        # Generation reserve must fit within discharge headroom and cannot coexist with charging.
+        if reserve.generation_product_stacking == "common_response_capacity":
+            matrix[row, intervals + t] = 1.0
+            matrix[row, generation_fir_slice.start + t] = 1.0
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+            matrix[row, generation_fir_slice.start + t] = 1.0
+            matrix[row, 3 * intervals + 1 + t] = asset.discharge_power_mw
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+            matrix[row, intervals + t] = 1.0
+            matrix[row, generation_sir_slice.start + t] = 1.0
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+            matrix[row, generation_sir_slice.start + t] = 1.0
+            matrix[row, 3 * intervals + 1 + t] = asset.discharge_power_mw
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+        else:
+            matrix[row, intervals + t] = 1.0
+            matrix[row, generation_fir_slice.start + t] = 1.0
+            matrix[row, generation_sir_slice.start + t] = 1.0
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+            matrix[row, generation_fir_slice.start + t] = 1.0
+            matrix[row, generation_sir_slice.start + t] = 1.0
+            matrix[row, 3 * intervals + 1 + t] = asset.discharge_power_mw
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+            matrix[row, intervals + t] = 1.0
+            matrix[row, generation_fir_slice.start + t] = 1.0
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+            matrix[row, generation_sir_slice.start + t] = 1.0
+            matrix[row, 3 * intervals + 1 + t] = asset.discharge_power_mw
+            constraint_upper[row] = asset.discharge_power_mw
+            row += 1
+
+        # Only generation reserve has a stored-energy sustain requirement.
+        matrix[row, 2 * intervals + t + 1] = 1.0
+        matrix[row, generation_fir_slice.start + t] = -reserve.generation_fir.sustain_hours / asset.eta_discharge
+        constraint_lower[row] = asset.soc_min_mwh
+        row += 1
+        matrix[row, 2 * intervals + t + 1] = 1.0
+        matrix[row, generation_sir_slice.start + t] = -reserve.generation_sir.sustain_hours / asset.eta_discharge
+        constraint_lower[row] = asset.soc_min_mwh
+        row += 1
+
+    if asset.max_daily_efc is not None:
+        matrix[row, discharge_slice] = HALF_HOUR
+        constraint_upper[row] = asset.max_daily_efc * asset.usable_energy_mwh * market["TradingDate"].nunique()
+
+    integrality = np.zeros(variable_count, dtype=int)
+    integrality[mode_slice] = 1
+    result = milp(
+        c=objective,
+        integrality=integrality,
+        bounds=Bounds(lower_bounds, upper_bounds),
+        constraints=LinearConstraint(matrix.tocsr(), constraint_lower, constraint_upper),
+        options={
+            "time_limit": float(solver_config["time_limit_seconds"]),
+            "mip_rel_gap": float(solver_config["mip_relative_gap"]),
+            "disp": False,
+        },
+    )
+    if not result.success or result.x is None:
+        raise RuntimeError(f"HiGHS did not solve the directional reserve MILP: {result.message}")
+
+    charge = np.clip(result.x[charge_slice], 0.0, None)
+    discharge = np.clip(result.x[discharge_slice], 0.0, None)
+    soc = result.x[soc_slice]
+    mode = np.rint(result.x[mode_slice]).astype(int)
+    charge_fir = np.clip(result.x[charge_fir_slice], 0.0, None)
+    charge_sir = np.clip(result.x[charge_sir_slice], 0.0, None)
+    generation_fir = np.clip(result.x[generation_fir_slice], 0.0, None)
+    generation_sir = np.clip(result.x[generation_sir_slice], 0.0, None)
+    charge_response = np.maximum(charge_fir, charge_sir) if reserve.charging_product_stacking == "common_response_capacity" else charge_fir + charge_sir
+    generation_response = np.maximum(generation_fir, generation_sir) if reserve.generation_product_stacking == "common_response_capacity" else generation_fir + generation_sir
+
+    intervals_out = market.copy()
+    intervals_out["charge_mw"] = charge
+    intervals_out["discharge_mw"] = discharge
+    intervals_out["net_grid_power_mw"] = discharge - charge
+    intervals_out["soc_start_mwh"] = soc[:-1]
+    intervals_out["soc_end_mwh"] = soc[1:]
+    intervals_out["charging_mode"] = mode
+    intervals_out["charge_mwh"] = charge * HALF_HOUR
+    intervals_out["discharge_mwh"] = discharge * HALF_HOUR
+    intervals_out["charge_reserve_response_capacity_mw"] = charge_response
+    intervals_out["generation_reserve_response_capacity_mw"] = generation_response
+    intervals_out["reserve_response_capacity_mw"] = charge_response + generation_response
+    intervals_out["fir_charge_interruptible_load_mw"] = charge_fir
+    intervals_out["sir_charge_interruptible_load_mw"] = charge_sir
+    intervals_out["fir_generation_reserve_mw"] = generation_fir
+    intervals_out["sir_generation_reserve_mw"] = generation_sir
+    intervals_out["fir_offer_mw"] = charge_fir + generation_fir
+    intervals_out["sir_offer_mw"] = charge_sir + generation_sir
+    intervals_out["energy_export_revenue_nzd"] = intervals_out["discharge_mwh"] * price
+    intervals_out["energy_import_cashflow_nzd"] = -intervals_out["charge_mwh"] * price
+    intervals_out["fir_charge_interruptible_load_revenue_nzd"] = charge_fir * fir_price * HALF_HOUR
+    intervals_out["sir_charge_interruptible_load_revenue_nzd"] = charge_sir * sir_price * HALF_HOUR
+    intervals_out["fir_generation_reserve_revenue_nzd"] = generation_fir * fir_price * HALF_HOUR
+    intervals_out["sir_generation_reserve_revenue_nzd"] = generation_sir * sir_price * HALF_HOUR
+    intervals_out["fir_reserve_revenue_nzd"] = (
+        intervals_out["fir_charge_interruptible_load_revenue_nzd"] + intervals_out["fir_generation_reserve_revenue_nzd"]
+    )
+    intervals_out["sir_reserve_revenue_nzd"] = (
+        intervals_out["sir_charge_interruptible_load_revenue_nzd"] + intervals_out["sir_generation_reserve_revenue_nzd"]
+    )
+    intervals_out["discharge_variable_cost_nzd"] = -intervals_out["discharge_mwh"] * float(
+        costs.get("discharge_variable_cost_per_mwh", costs.get("degradation_cost_per_mwh_discharged", 0.0))
+    )
+    intervals_out["degradation_cost_nzd"] = intervals_out["discharge_variable_cost_nzd"]
+    intervals_out["frequency_keeping_cost_nzd"] = -intervals_out["charge_mwh"] * float(
+        costs.get("frequency_keeping_charge_per_mwh_imported", 0.0)
+    )
+    intervals_out["trading_import_cost_nzd"] = -intervals_out["charge_mwh"] * float(costs.get("trading_charge_per_mwh_imported", 0.0))
+    intervals_out["trading_export_cost_nzd"] = -intervals_out["discharge_mwh"] * float(costs.get("trading_charge_per_mwh_exported", 0.0))
+    intervals_out["ir_allocation_cost_nzd"] = -intervals_out["discharge_mwh"] * float(
+        costs.get("instantaneous_reserve_cost_per_mwh_exported", 0.0)
+    )
+    intervals_out["fixed_opex_cost_nzd"] = -(
+        float(costs["fixed_opex_annual_nzd"]) + float(costs["transmission_and_connection_annual_nzd"])
+    ) / 365.0 / 48.0
+    cashflow_columns = [
+        "energy_export_revenue_nzd",
+        "energy_import_cashflow_nzd",
+        "fir_reserve_revenue_nzd",
+        "sir_reserve_revenue_nzd",
+        "discharge_variable_cost_nzd",
+        "frequency_keeping_cost_nzd",
+        "trading_import_cost_nzd",
+        "trading_export_cost_nzd",
+        "ir_allocation_cost_nzd",
+        "fixed_opex_cost_nzd",
+    ]
+    intervals_out["variable_margin_nzd"] = intervals_out[cashflow_columns[:-1]].sum(axis=1)
+    intervals_out["net_cashflow_nzd"] = intervals_out[cashflow_columns].sum(axis=1)
+
+    calculated_margin = float(intervals_out["variable_margin_nzd"].sum())
+    if not np.isclose(calculated_margin, -float(result.fun), atol=1e-3):
+        raise RuntimeError("Directional reserve MILP objective does not reconcile to calculated variable margin.")
+    if not np.all(charge * discharge < 1e-5):
+        raise RuntimeError("Simultaneous charging and discharging detected.")
+    if not np.isclose(soc[0], soc[-1], atol=1e-5):
+        raise RuntimeError("Terminal state of charge does not reconcile to initial state of charge.")
+    if not np.all(charge_response <= charge + 1e-5):
+        raise RuntimeError("Interruptible-load reserve exceeds scheduled charging load.")
+    if not np.all(discharge + generation_response <= asset.discharge_power_mw + 1e-5):
+        raise RuntimeError("Generation reserve exceeds discharge headroom.")
+    if not np.all(generation_response <= asset.discharge_power_mw * (1 - mode) + 1e-5):
+        raise RuntimeError("Generation reserve was offered while charging.")
+    if not np.all(soc[1:] - generation_fir * reserve.generation_fir.sustain_hours / asset.eta_discharge >= asset.soc_min_mwh - 1e-5):
+        raise RuntimeError("Generation FIR offer does not retain sufficient stored energy.")
+    if not np.all(soc[1:] - generation_sir * reserve.generation_sir.sustain_hours / asset.eta_discharge >= asset.soc_min_mwh - 1e-5):
+        raise RuntimeError("Generation SIR offer does not retain sufficient stored energy.")
+
+    return intervals_out, {
+        "solver": "HiGHS via scipy.optimize.milp",
+        "dispatch_case": "directional_fir_sir_price_taker",
+        "solver_status": int(result.status),
+        "solver_message": result.message,
+        "objective_variable_margin_nzd": calculated_margin,
+        "mip_gap": None if getattr(result, "mip_gap", None) is None else float(result.mip_gap),
+        "usable_energy_mwh": asset.usable_energy_mwh,
+        "charge_power_mw": asset.charge_power_mw,
+        "discharge_power_mw": asset.discharge_power_mw,
+        "initial_soc_mwh": asset.initial_soc_mwh,
+        "terminal_soc_mwh": float(soc[-1]),
+        "reserve_case_status": "illustrative_directional_price_taker_upper_bound",
+        "charging_reserve_mechanism": "interruptible_load",
+        "charging_product_stacking": reserve.charging_product_stacking,
+        "generation_product_stacking": reserve.generation_product_stacking,
+        "activation_energy_modelled": False,
+    }
+
+
 def solve_energy_dispatch(market: pd.DataFrame, config: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Optimise energy arbitrage only with a binary operating-mode constraint."""
     return _solve_dispatch(market, config, reserve_scenario=None)
@@ -378,8 +746,13 @@ def solve_energy_dispatch(market: pd.DataFrame, config: dict[str, Any]) -> tuple
 def solve_fir_sir_price_taker_dispatch(
     market: pd.DataFrame, config: dict[str, Any]
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Optimise energy plus the explicitly optimistic shared-capacity FIR/SIR case."""
+    """Optimise energy plus configured FIR/SIR price-taker reserve capability."""
     asset = asset_from_config(config)
+    reserve_config = config.get("reserve_price_taker", {})
+    if "charging_interruptible_load" in reserve_config or "discharging_generation" in reserve_config:
+        return _solve_directional_reserve_dispatch(
+            market, config, directional_reserve_scenario_from_config(config, asset)
+        )
     return _solve_dispatch(market, config, reserve_scenario_from_config(config, asset))
 
 

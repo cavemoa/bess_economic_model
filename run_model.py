@@ -93,17 +93,32 @@ def main() -> None:
         scenario_comparison = build_scenario_comparison(
             energy_intervals, reserve_intervals, energy_finance_meta, reserve_finance_meta
         )
+        directional_reserve = "charging_interruptible_load" in config.get("reserve_price_taker", {})
+        reserve_limitations = [
+            "Historic final FIR/SIR prices are treated as unaffected by a 100 MW storage offer.",
+            "Actual System Operator approval, offer envelopes, clearing quantities, risk allocation and activation energy are not modelled.",
+        ]
+        if directional_reserve:
+            reserve_limitations.insert(
+                1,
+                "Charging FIR/SIR is an illustrative interruptible-load capability and generation reserve is limited to the YAML envelope.",
+            )
+            reserve_limitations.insert(
+                2,
+                "Common charging-response capacity can earn both FIR and SIR only because the configured illustrative stacking rule permits it.",
+            )
+        else:
+            reserve_limitations.insert(
+                1,
+                "One certified response capacity is assumed to earn both FIR and SIR availability revenue.",
+            )
         summary.update(
             {
                 "scope": (
                     "Historical, perfect-foresight price-taker comparison. The FIR/SIR case is an "
-                    "optimistic upper bound, not a clearing or investment forecast."
+                    "illustrative upper bound, not a clearing or investment forecast."
                 ),
-                "reserve_case_limitations": [
-                    "Historic final FIR/SIR prices are treated as unaffected by a 100 MW BESS offer.",
-                    "One certified response capacity is assumed to earn both FIR and SIR availability revenue.",
-                    "Actual System Operator approval, offer envelopes, clearing quantities, risk allocation and activation energy are not modelled.",
-                ],
+                "reserve_case_limitations": reserve_limitations,
                 "fir_sir_price_taker": reserve_summary,
                 "incremental_fir_sir_price_taker_vs_energy_only": {
                     row["metric"]: float(row["incremental_fir_sir_vs_energy_only"])

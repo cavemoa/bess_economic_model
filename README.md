@@ -13,6 +13,8 @@ python run_model.py --config config/base_case.yaml
 python run_model.py --config config/annual_complete_2024-12_to_2025-11.yaml
 # Full-year A-CAES duration and cost sensitivity (100 MW x 8, 10 and 12 hours)
 python run_caes_sensitivity.py --config config/acaes_sfd2201_annual_sensitivity.yaml
+# 50 MW / 2-hour A-CAES power-island/storage-cost NPV frontier
+python run_caes_cost_frontier.py --config config/acaes_sfd2201_50mw_2h_cost_frontier.yaml
 ```
 
 The standard test suite completes quickly. The cached historic BESS regressions are deliberately opt-in because they solve the June and annual HiGHS MILPs:
@@ -31,6 +33,14 @@ The former all-in-one BESS assumptions are now composed from three files:
 - `config/cost_cases/` holds independent capital and operating-cost cases. A power-and-energy capital model prevents A-CAES power-island and cavern/thermal-storage cost assumptions from being double counted.
 
 `config/acaes_sfd2201_annual_sensitivity.yaml` references `acaes_salt.yaml` and the low, central and high A-CAES cost cases. It treats duration as nameplate MWh divided by 100 MW of discharge power. The configured A-CAES has a full 0--100% SoC window, so 8, 10 and 12 hours correspond to 800, 1,000 and 1,200 MWh respectively.
+
+The illustrative A-CAES reserve envelope is controlled entirely in `config/systems/acaes_salt.yaml`:
+
+- `charging_interruptible_load.fir.enabled` and `.sir.enabled` switch charging-load products on or off.
+- `charging_interruptible_load.product_stacking` is `common_response_capacity` for the illustrative stacked case, or `exclusive_capacity` to require FIR plus SIR to fit within the scheduled charging MW.
+- `discharging_generation.fir.enabled` and `.sir.enabled` independently control generation reserve. The supplied system enables SIR only.
+
+Charging reserve is limited by scheduled compressor load; generation reserve is limited by discharge headroom and the configured FIR/SIR sustain energy. Reserve activations are not simulated, so this remains a historic-price availability upper bound.
 
 The first run downloads official public price data into `data/raw/2026-06/`. Subsequent runs use the local cache. Outputs are created in `outputs/2026-06/`:
 
@@ -55,6 +65,17 @@ The A-CAES run writes to `outputs/acaes_salt/2024-12_to_2025-11/`:
 - `npv_tornado.csv` and `npv_tornado.png` - isolated low/high NPV effects for power-island, storage, interconnection, fixed O&M and variable O&M assumptions. Variable O&M endpoints are separately re-optimised; the other bars are finance-only changes because they cannot change dispatch.
 - `sensitivity_summary.json` and `data_manifest.json` - scope and data provenance.
 
+The 50 MW / 2-hour cost-frontier run writes to `outputs/acaes_salt_50mw_2h_cost_frontier/2024-12_to_2025-11/`:
+
+- `cost_frontier_npv.png` - filled power-island versus storage-cost NPV contour, with a black zero-NPV frontier.
+- `cost_frontier_grid.csv` - every cost combination, CAPEX and NPV; the default grid has 40,401 points.
+- `cost_frontier_break_even.csv` - the maximum power-island cost at each storage-cost value that produces NPV = 0.
+- `cost_frontier_tornado.csv` and `cost_frontier_tornado.png` - one-at-a-time low/central/high effects for power-island, storage, interconnection, fixed O&M and variable O&M. Variable O&M endpoints are re-optimised; all other bars reuse the central optimal dispatch.
+- `cumulative_revenue_daily.csv` and `cumulative_revenue.png` - daily cumulative historic revenue by energy and directional reserve source, plus gross revenue, variable margin and cashflow after fixed O&M.
+- `frontier_operating_case_cashflows.csv` and `cost_frontier_summary.json` - the one annual dispatch solve underpinning the vectorised capital grid.
+
+Only the operating case is optimised. Power-island and storage CAPEX do not affect dispatch, so the contour grid itself is calculated directly from the present value of operating cashflows rather than solving one MILP per point. The tornado low/high bounds come from `cost_frontier.tornado` in [config/acaes_sfd2201_50mw_2h_cost_frontier.yaml](config/acaes_sfd2201_50mw_2h_cost_frontier.yaml). Switch `cost_frontier.operating_case` between `configured_reserve_stack` and `energy_only` there to compare the two frontiers.
+
 ## Model boundaries
 
 Energy revenue uses final `SFD2201` prices. The reserve scenario uses final North Island FIR/SIR availability prices and co-optimises charging, discharging, inverter headroom and stored energy. Reserve availability revenue is `offered MW x final price x 0.5 hour`.
@@ -63,7 +84,7 @@ The default `reserve_price_taker` case assumes one certified response capacity c
 
 The `finance` section in [config/base_case.yaml](config/base_case.yaml) is a **pre-tax, ungeared, real-NZD scenario**, not a Stratford investment quote. In particular, its capex and fixed O&M values are placeholders for sensitivity analysis until connection works, BBCs, insurance, O&M and augmentation assumptions are supplied.
 
-The A-CAES low/central/high cases are likewise published-range screening assumptions expressed in USD and converted using an explicit, configurable 1.65 NZD/USD real-2026 conversion. They are not a geotechnical, EPC, connection or consent estimate. The initial A-CAES model does not include FIR/SIR revenue because it has no evidenced System Operator response envelope.
+The A-CAES low/central/high cases are likewise published-range screening assumptions expressed in USD and converted using an explicit, configurable 1.65 NZD/USD real-2026 conversion. They are not a geotechnical, EPC, connection or consent estimate. Its FIR/SIR configuration is illustrative only, not an evidenced vendor or System Operator response envelope.
 
 ## Assumptions to replace when project evidence is available
 

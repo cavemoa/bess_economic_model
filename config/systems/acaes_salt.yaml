@@ -2,7 +2,8 @@ id: acaes_salt_100mw
 technology: adiabatic_compressed_air_energy_storage
 description: >-
   Generic salt-cavern adiabatic CAES (A-CAES) reference system. It is modelled as
-  energy-only until a technology-specific reserve response envelope is evidenced.
+  an illustrative price-taking reserve provider; its envelope must not be interpreted
+  as a vendor-tested or System Operator-approved capability.
 
 asset:
   charge_power_mw: 100.0
@@ -16,4 +17,31 @@ asset:
   max_equivalent_full_cycles_per_day: null
 
 reserve_price_taker:
-  enabled: false
+  # Illustration only: historic FIR/SIR prices are treated as unaffected by the asset.
+  # Each product and stack can be disabled independently without changing model code.
+  enabled: true
+
+  charging_interruptible_load:
+    # The same controllable compressor load is assumed eligible for both payments.
+    # Use exclusive_capacity to restrict FIR + SIR to the scheduled charging MW.
+    product_stacking: common_response_capacity
+    fir:
+      enabled: true
+      max_offer_mw: 100.0
+      sustain_minutes: 1.0
+    sir:
+      enabled: true
+      max_offer_mw: 100.0
+      sustain_minutes: 15.0
+
+  discharging_generation:
+    # SIR only during non-charging operation. Disable it or change stacking here.
+    product_stacking: exclusive_capacity
+    fir:
+      enabled: false
+      max_offer_mw: 0.0
+      sustain_minutes: 1.0
+    sir:
+      enabled: true
+      max_offer_mw: 100.0
+      sustain_minutes: 15.0

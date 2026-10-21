@@ -1,0 +1,44 @@
+simulation:
+  id: acaes_sfd2201_50mw_2h_cost_frontier
+  system_file: systems/acaes_salt_50mw_2h.yaml
+  cost_case_file: cost_cases/acaes_salt_central.yaml
+
+data:
+  start_month: "2024-12"
+  end_month: "2025-11"
+  node: SFD2201
+  island: NI
+  raw_data_dir: data/raw
+
+finance:
+  project_life_years: 40
+  real_discount_rate: 0.08
+  annual_variable_margin_fade: 0.005
+  annualisation_factor: 1
+  augmentation: []
+
+solver:
+  time_limit_seconds: 900
+  mip_relative_gap: 0.0001
+
+reporting:
+  output_dir: outputs/acaes_salt_50mw_2h_cost_frontier
+
+cost_frontier:
+  # Use configured_reserve_stack for the illustrative directional FIR/SIR case,
+  # or energy_only to solve just arbitrage before calculating the capital frontier.
+  operating_case: configured_reserve_stack
+  # Cost axes and fixed connection allowance are in the source cost-case currency (USD).
+  power_island_cost_per_kw:
+    min: 0.0
+    max: 2500.0
+    points: 201
+  storage_cost_per_kwh:
+    min: 0.0
+    max: 100.0
+    points: 201
+  interconnection_cost_per_kw: 140.0
+  tornado:
+    # Low/high cases vary one input at a time around the central case.
+    low_cost_case_file: cost_cases/acaes_salt_low.yaml
+    high_cost_case_file: cost_cases/acaes_salt_high.yaml
